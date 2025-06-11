@@ -5,6 +5,7 @@
 #include "GameFramework/PlayerController.h"
 #include "InputActionValue.h"
 #include "TimerManager.h"
+#include "DrawDebugHelpers.h"
 #include "StrategyPlayerController.generated.h"
 
 class UInputMappingContext;
@@ -42,7 +43,13 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input|Camera")
 	TObjectPtr<UInputAction> RotateActionValue;
 
-
+	// --- ADD THESE DEBUGGING VARIABLES ---
+	FVector DebugBeforeZoomLocation;
+	FVector DebugAfterZoomLocation;
+	FTimerHandle DebugAfterZoomTimerHandle;
+	void UpdateDebugAfterSphere();
+	// --- END OF DEBUGGING VARIABLES ---
+	
 	// --- Camera Control Parameters ---
 	// (All camera control UPROPERTYs remain the same)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom")
@@ -91,6 +98,6 @@ private:
 	void HandleRotateCameraValue(const FInputActionValue& Value);
 
 	void InitializeCameraSettings();
-	void UpdateCameraMovement(float DeltaTime);
 	void UpdateCameraZoomAndPitch(float DeltaTime);
+	void UpdateCameraMovement(float DeltaTime);
 };

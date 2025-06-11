@@ -18,6 +18,9 @@ AStrategyPlayerController::AStrategyPlayerController()
 	// Initialize pointers
 	PossessedCameraPawn = nullptr;
 	TargetZoomLength = 1500.f; // Set a sensible default
+
+	DebugBeforeZoomLocation = FVector(FLT_MAX);
+	DebugAfterZoomLocation = FVector(FLT_MAX);
 }
 
 // --- ON POSSESS: The new place to initialize everything ---
@@ -84,6 +87,8 @@ void AStrategyPlayerController::Tick(float DeltaTime)
 		return;
 	}
 
+	UpdateCameraZoomAndPitch(DeltaTime);
+
 	// Log a detailed status update every 120 frames
 	if (GFrameCounter % 120 == 0)
 	{
@@ -99,7 +104,17 @@ void AStrategyPlayerController::Tick(float DeltaTime)
 		UE_LOG(LogTemp, Verbose, TEXT("---------------------------------"));
 	}
 	
-	UpdateCameraZoomAndPitch(DeltaTime);
+
+	// Draw the "Before" sphere in Green if its location is valid
+	if (DebugBeforeZoomLocation.X != FLT_MAX)
+	{
+		DrawDebugSphere(GetWorld(), DebugBeforeZoomLocation, 50.f, 12, FColor::Green, false, -1.f, 0, 2.f);
+	}
+	// Draw the "After" sphere in Red if its location is valid
+	if (DebugAfterZoomLocation.X != FLT_MAX)
+	{
+		DrawDebugSphere(GetWorld(), DebugAfterZoomLocation, 50.f, 12, FColor::Red, false, -1.f, 0, 2.f);
+	}
 }
 
 // --- SETUP INPUT COMPONENT: Stays mostly the same ---
@@ -114,6 +129,27 @@ void AStrategyPlayerController::SetupInputComponent()
         if (RotateActionTrigger) EnhancedInput->BindAction(RotateActionTrigger.Get(), ETriggerEvent::Triggered, this, &AStrategyPlayerController::HandleRotateCameraTrigger);
         if (RotateActionValue) EnhancedInput->BindAction(RotateActionValue.Get(), ETriggerEvent::Triggered, this, &AStrategyPlayerController::HandleRotateCameraValue);
     }
+}
+
+void AStrategyPlayerController::UpdateDebugAfterSphere()
+{
+	FHitResult AfterHit;
+	if (GetHitResultUnderCursor(ECollisionChannel::ECC_Visibility, false, AfterHit) && AfterHit.bBlockingHit)
+	{
+		// Capture the "after" location.
+		DebugAfterZoomLocation = AfterHit.Location;
+
+		// --- ADDED LOGGING ---
+		UE_LOG(LogTemp, Warning, TEXT("[DEBUG SPHERES] AFTER zoom location captured:  %s"), *DebugAfterZoomLocation.ToString());
+
+		// Also log the error vector and distance if the "before" location is valid
+		if (DebugBeforeZoomLocation.X != FLT_MAX)
+		{
+			const FVector ErrorVector = DebugAfterZoomLocation - DebugBeforeZoomLocation;
+			const float ErrorDistance = ErrorVector.Size();
+			UE_LOG(LogTemp, Error, TEXT("[DEBUG SPHERES] Zoom Error Vector (After - Before): %s | Distance: %.2f"), *ErrorVector.ToString(), ErrorDistance);
+		}
+	}
 }
 
 // --- INITIALIZE CAMERA: Now operates on the pawn's boom ---
@@ -135,18 +171,18 @@ void AStrategyPlayerController::InitializeCameraSettings()
 	}
 }
 
-// --- UPDATE ZOOM/PITCH: Now operates on the pawn's boom ---
+
 void AStrategyPlayerController::UpdateCameraZoomAndPitch(float DeltaTime)
 {
 	if (!PossessedCameraPawn) return;
 	USpringArmComponent* CameraBoom = PossessedCameraPawn->GetCameraBoom();
 	if (!CameraBoom) return;
 
-	// Interpolate Target Arm Length
+	// 1. Smoothly interpolate the actual arm length towards our target.
 	const float InterpolatedArmLength = FMath::FInterpTo(CameraBoom->TargetArmLength, TargetZoomLength, DeltaTime, ZoomInterpSpeed);
 	CameraBoom->TargetArmLength = InterpolatedArmLength;
 
-	// Calculate and Interpolate Pitch based on Curve
+	// 2. Smoothly interpolate the pitch based on the curve and the *current* interpolated length.
 	if (CameraPitchByZoomCurve)
 	{
 		const float TargetPitchValue = CameraPitchByZoomCurve->GetFloatValue(InterpolatedArmLength);
@@ -155,7 +191,6 @@ void AStrategyPlayerController::UpdateCameraZoomAndPitch(float DeltaTime)
 		CameraBoom->SetRelativeRotation(CurrentBoomRotation);
 	}
 }
-
 
 // --- HANDLE MOVE INPUT: Now uses AddMovementInput on the pawn ---
 void AStrategyPlayerController::HandleMoveInput(const FInputActionValue& Value)
@@ -203,51 +238,51 @@ void AStrategyPlayerController::HandleZoomInput(const FInputActionValue& Value)
 		return;
 	}
 
-	// --- Proactive Panning Calculation (ONLY for Zooming IN) ---
+	// --- Final, Correct Logic (ONLY for Zooming IN) ---
 	if (ZoomAxisValue > 0)
 	{
 		FHitResult HitResult;
 		if (GetHitResultUnderCursor(ECollisionChannel::ECC_Visibility, false, HitResult) && HitResult.bBlockingHit)
 		{
-			// 1. Calculate the direction to pan.
-			const FVector FocusPoint = HitResult.Location;
-			const FVector PawnLocation = PossessedCameraPawn->GetActorLocation();
-			FVector PanDirection = FocusPoint - PawnLocation;
-			PanDirection.Z = 0.f;
-			PanDirection.Normalize();
-
-			// 2. Calculate the horizontal distance of the camera from the pawn BEFORE the zoom.
+			// --- The "What-If" Calculation ---
+			
+			// 1. Get the properties of the camera boom BEFORE the zoom.
 			const float CurrentArmLength = CameraBoom->TargetArmLength;
-			const float CurrentPitchRad = FMath::DegreesToRadians(CameraBoom->GetRelativeRotation().Pitch);
-			const float HorizontalOffset_Before = CurrentArmLength * FMath::Cos(CurrentPitchRad);
+			const FRotator CurrentBoomRotation = CameraBoom->GetRelativeRotation();
 
-			// 3. Calculate the new arm length and pitch AFTER the zoom.
-			const float NewArmLength = FMath::Clamp(CurrentArmLength - ZoomAxisValue * ZoomStepAmount, MinZoomLength, MaxZoomLength);
-			float NewPitchDeg = CameraBoom->GetRelativeRotation().Pitch;
+			// 2. Calculate the properties of the camera boom AFTER the zoom.
+			const float NewArmLength = FMath::Clamp(CurrentArmLength - (ZoomAxisValue * ZoomStepAmount), MinZoomLength, MaxZoomLength);
+			FRotator NewBoomRotation = CurrentBoomRotation;
 			if (CameraPitchByZoomCurve)
 			{
-				// Get the new pitch from the curve and multiply by -1
-				NewPitchDeg = CameraPitchByZoomCurve->GetFloatValue(NewArmLength) * -1.f;
+				NewBoomRotation.Pitch = CameraPitchByZoomCurve->GetFloatValue(NewArmLength) * -1.f;
 			}
-			const float NewPitchRad = FMath::DegreesToRadians(NewPitchDeg);
 
-			// 4. Calculate the horizontal distance of the camera from the pawn AFTER the zoom.
-			const float HorizontalOffset_After = NewArmLength * FMath::Cos(NewPitchRad);
+			// 3. Find the location of the point under the mouse.
+			const FVector FocusPoint = HitResult.Location;
 
-			// 5. The magnitude of our pan is the change in the horizontal offset.
-			const float PanMagnitude = HorizontalOffset_Before - HorizontalOffset_After;
+			// 4. Calculate the camera's ground footprint vector BEFORE and AFTER the zoom.
+			const FVector PawnLocation = PossessedCameraPawn->GetActorLocation();
+			const FVector CameraOffset_Before = CurrentBoomRotation.Vector() * CurrentArmLength;
+			const FVector CameraOffset_After = NewBoomRotation.Vector() * NewArmLength;
 
-			// 6. The final world offset is the direction towards the mouse, scaled by the correct magnitude.
-			const FVector WorldOffset = PanDirection * PanMagnitude;
+			// The ground footprint is the camera's XY offset from the pawn.
+			const FVector GroundFootprint_Before(CameraOffset_Before.X, CameraOffset_Before.Y, 0.f);
+			const FVector GroundFootprint_After(CameraOffset_After.X, CameraOffset_After.Y, 0.f);
 			
-			// Instantly move the pawn by this calculated offset.
-			PossessedCameraPawn->AddActorWorldOffset(WorldOffset, true);
+			// 5. Calculate the vector from the pawn to the focus point.
+			const FVector PawnToFocus = FocusPoint - PawnLocation;
+
+			// 6. The required pawn offset is the difference in how the ground footprint affects the focus point.
+			const FVector WorldOffset = (PawnToFocus.GetSafeNormal() * GroundFootprint_After.Size()) - (PawnToFocus.GetSafeNormal() * GroundFootprint_Before.Size());
+			
+			// Invert the offset because we are moving the pawn, not the camera.
+			PossessedCameraPawn->AddActorWorldOffset(WorldOffset * -1.f, true);
 		}
 	}
-	// For Zooming OUT, we do no special panning logic.
 
-	// Finally, update the target zoom length for the Tick function to smoothly interpolate to.
-	TargetZoomLength = FMath::Clamp(CameraBoom->TargetArmLength - ZoomAxisValue * ZoomStepAmount, MinZoomLength, MaxZoomLength);
+	// --- Apply the new zoom target for the Tick function to handle ---
+	TargetZoomLength = FMath::Clamp(CameraBoom->TargetArmLength - (ZoomAxisValue * ZoomStepAmount), MinZoomLength, MaxZoomLength);
 }
 
 void AStrategyPlayerController::HandleRotateCameraTrigger(const FInputActionValue& Value)
